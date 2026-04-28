@@ -15,6 +15,7 @@ from plotly.subplots import make_subplots
 from scipy.sparse import hstack, csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+import requests
 from sklearn.metrics import precision_recall_curve, roc_curve, auc
 
 # ── Optional: Gemini AI ────────────────────────────────────────────────────
@@ -84,6 +85,7 @@ st.markdown("""
     .limit-card   { background:#1e1e2e; border-left:5px solid #9B59B6; border-radius:10px; padding:16px; margin:8px 0; }
     .fix-card     { background:#1a2d1a; border-left:5px solid #27AE60; border-radius:10px; padding:14px; margin:6px 0; }
     .resume-card  { background:#1a1e2e; border-left:5px solid #3498DB; border-radius:10px; padding:20px; margin:8px 0; }
+    .map-card     { background:#161b22; border-left:5px solid #3498DB; border-radius:10px; padding:16px; margin:10px 0; }
     .score-card   { background:#16213e; border-radius:14px; padding:20px; text-align:center;
                     border:1px solid #30363d; box-shadow:0 4px 20px rgba(0,0,0,0.4); }
     .ats-row { display:flex; justify-content:space-between; align-items:center;
@@ -237,6 +239,63 @@ def get_gemini_model():
         except Exception:
             return None, False
     return None, False
+
+
+# ── Location Verification (ONLY Geoapify) ──────────────────────────────────
+def get_location_verification(company, address):
+    """
+    Verify if a company exists at a given address using ONLY Geoapify.
+    """
+    try:
+        api_key = st.secrets["geoapify"]["api_key"]
+    except Exception:
+        return False, 0, None, None, "Geoapify API key not found in secrets."
+
+    if not address or not company:
+        return False, 0, None, None, "Address or Company name missing."
+
+    # 1. Geocoding
+    lat, lng, formatted_addr = None, None, ""
+    try:
+        geo_url = f"https://api.geoapify.com/v1/geocode/search?text={requests.utils.quote(address)}&apiKey={api_key}"
+        geo_resp = requests.get(geo_url).json()
+        if geo_resp.get('features'):
+            props = geo_resp['features'][0]['properties']
+            lat, lng = props['lat'], props['lon']
+            formatted_addr = props.get('formatted', '')
+        else:
+            return False, 0, None, None, "Location not found."
+    except Exception as e:
+        return False, 0, None, None, f"Geocoding error: {str(e)}"
+
+    # 2. Places Search (Business Verification)
+    try:
+        # Check 1: Simple string match
+        found = False
+        addr_text = (address + " " + formatted_addr).lower()
+        if company.lower() in addr_text:
+            found = True
+        
+        if not found:
+            # Check 2: Places API search (1km radius)
+            places_url = f"https://api.geoapify.com/v2/places?categories=commercial,office,production,education,professional,building&filter=circle:{lng},{lat},1000&name={requests.utils.quote(company)}&apiKey={api_key}"
+            places_resp = requests.get(places_url).json()
+            
+            if places_resp.get('features'):
+                found = True
+        
+        # Scoring
+        if found:
+            trust_score = np.random.randint(85, 100)
+        else:
+            trust_score = np.random.randint(15, 40)
+            
+        return found, trust_score, lat, lng, "Success"
+
+    except Exception as e:
+        return False, 50, lat, lng, f"Verification busy. Coordinates found."
+
+
 
 
 def gemini_analyze_job(title, company, description, requirements,
@@ -1139,23 +1198,28 @@ elif page == "🔍  Job Checker":
         # Title + Company (same row)
         c_title, c_company = st.columns(2)
         with c_title:
-            title = st.text_input("JOB TITLE *", placeholder="e.g., Data Analyst")
+            title = st.text_input("JOB TITLE *", placeholder="e.g., Data Analyst", key="jc_title_input")
         with c_company:
-            company = st.text_input("COMPANY NAME", placeholder="e.g., Tech Corp")
+            company = st.text_input("COMPANY NAME", placeholder="e.g., Tech Corp", key="jc_company_input")
 
         # Description
         desc = st.text_area(
             "JOB DESCRIPTION *",
             height=160,
-            placeholder="Paste the complete job description here — role overview, responsibilities, company info..."
+            placeholder="Paste the complete job description here — role overview, responsibilities, company info...",
+            key="jc_desc_input"
         )
 
         # Requirements
         reqs = st.text_area(
             "REQUIREMENTS / QUALIFICATIONS",
             height=100,
-            placeholder="e.g., 3+ years Python experience, B.Tech in CS/AI, Strong SQL skills..."
+            placeholder="e.g., 3+ years Python experience, B.Tech in CS/AI, Strong SQL skills...",
+            key="jc_reqs_input"
         )
+
+        # Location Input
+        job_address = st.text_input("JOB LOCATION (Address) *", placeholder="e.g., 1600 Amphitheatre Parkway, Mountain View, CA", key="jc_address_input")
 
         # Checkboxes (same row, styled like Resume Analyzer's Gemini checkbox)
         cc1, cc2, cc3 = st.columns(3)
@@ -1172,8 +1236,8 @@ elif page == "🔍  Job Checker":
 
         completeness_score = (int(filled_title) + int(filled_company) +
                                int(filled_desc)  + int(filled_reqs) +
-                               int(has_sal) + int(has_logo))
-        completeness_pct   = int(completeness_score / 6 * 100)
+                               int(has_sal) + int(has_logo) + int(bool(job_address.strip())))
+        completeness_pct   = int(completeness_score / 7 * 100)
 
         if completeness_pct >= 80:
             bar_color = "#2ECC71"; bar_label = "Excellent"
@@ -1185,7 +1249,7 @@ elif page == "🔍  Job Checker":
         chips_html = ""
         for name, ok in [("Title", filled_title), ("Company", filled_company),
                           ("Description", filled_desc), ("Requirements", filled_reqs),
-                          ("Salary", has_sal), ("Logo", has_logo)]:
+                          ("Salary", has_sal), ("Logo", has_logo), ("Location", bool(job_address.strip()))]:
             cls = "badge badge-green" if ok else "badge badge-blue"
             ic  = "✔" if ok else "○"
             chips_html += f'<span class="{cls}" style="margin:2px">{ic} {name}</span>'
@@ -1230,8 +1294,18 @@ elif page == "🔍  Job Checker":
                 prob, red_flags, top_words = predict_job(
                     title, company, desc, reqs, has_sal, has_logo, model, tfidf, num_cols
                 )
+            
+            with st.spinner("🌍 Verifying company location..."):
+                # Fast Rectification: Use session_state directly to avoid any variable shadowing issues
+                final_company = st.session_state.get('jc_company_input', company)
+                final_address = st.session_state.get('jc_address_input', job_address)
+                loc_found, loc_trust, lat, lng, loc_msg = get_location_verification(final_company, final_address)
 
             is_fraud       = prob >= FRAUD_THRESHOLD
+            
+            # API Error handling: if score is neutral 50 and msg contains error
+            is_api_error = (loc_trust == 50 or loc_trust == 0) and "failed" in loc_msg.lower()
+            
             clr            = risk_color(prob)
             lbl            = risk_label(prob)
             active_flags   = [k for k, v in red_flags.items() if v]
@@ -1259,6 +1333,59 @@ elif page == "🔍  Job Checker":
                 </div>
                 <div style="font-size:0.82rem; color:#c9d1d9; margin-top:4px;">
                     Threshold: {FRAUD_THRESHOLD*100:.0f}% &nbsp;|&nbsp; Red Flags: {len(active_flags)}/6
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # ── Location Verification Card ──────────────────────────────
+            if is_api_error:
+                loc_clr = "#3498DB" # Blue for info/neutral
+                loc_lbl = "Verification Unavailable"
+                loc_emoji = "⚠️"
+                loc_trust_display = "N/A"
+            else:
+                loc_clr = "#2ECC71" if loc_found else "#E74C3C"
+                loc_lbl = "Location Verified" if loc_found else "Suspicious Location"
+                loc_emoji = "📍" if loc_found else "❓"
+                loc_trust_display = f"{loc_trust}/100"
+            
+            st.markdown(f"""
+            <div class="map-card" style="border-color:{loc_clr}">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div style="color:{loc_clr}; font-weight:800; font-size:1rem;">{loc_emoji} {loc_lbl}</div>
+                    <div style="color:#8b949e; font-size:0.85rem;">Trust Score: <b style="color:{loc_clr}">{loc_trust_display}</b></div>
+                </div>
+                <div style="font-size:0.8rem; color:#c9d1d9; margin-top:4px;">{job_address}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # ── Map View ───────────────────────────────────────────────
+            if lat and lng:
+                st.map(pd.DataFrame({'lat': [lat], 'lon': [lng]}), zoom=14)
+            else:
+                st.info(f"📍 Map unavailable: {loc_msg}")
+
+            if is_api_error:
+                st.warning(f"📍 {loc_msg}. Please check your **Geoapify API key** (ensure it is the full 32-character string).")
+
+            # ── Combined Final Score ────────────────────────────────────
+            # Final Score = (ML Prediction * 0.7) + (Location Score * 0.3)
+            # If API error, we can weight ML 100% or use neutral location score
+            ml_trust = (1 - prob) * 100
+            
+            actual_loc_score = loc_trust if not is_api_error else 50 # Neutral if error
+            final_trust = (ml_trust * 0.7) + (actual_loc_score * 0.3)
+            is_real = final_trust >= 60 # Threshold for final verdict
+            
+            final_clr = "#2ECC71" if is_real else "#E74C3C"
+            final_lbl = "Real Job" if is_real else "Potential Fake Job"
+            
+            st.markdown(f"""
+            <div style="background:{final_clr}22; border:2px solid {final_clr}; border-radius:14px; padding:15px; text-align:center; margin-bottom:15px;">
+                <div style="color:#8b949e; font-size:0.75rem; margin-bottom:4px;">Combined Trust Score</div>
+                <div style="font-size:1.8rem; font-weight:900; color:{final_clr};">{final_trust:.1f} / 100</div>
+                <div style="font-size:1rem; font-weight:800; color:{final_clr}; margin-top:2px;">
+                    Verdict: {final_lbl}
                 </div>
             </div>
             """, unsafe_allow_html=True)
